@@ -60,6 +60,20 @@ Merged and closed PRs are marked `✓` and `✗`.
 
 `/treehouse` clears the cache and forces a fresh lookup.
 
+## Scope
+
+This repo holds **tool-specific code** — things only pi or herdr can load.
+Agent-agnostic skills live in a separate repo:
+
+| | |
+| --- | --- |
+| pi extensions, herdr plugins | this repo |
+| Skills (agent-agnostic) | [funkode-io/skills](https://github.com/funkode-io/skills) |
+
+The split is by consumer, not by tool. A plugin that extends herdr belongs
+here; a skill that teaches an agent to *drive* herdr belongs in the skills repo,
+where the Skills CLI can install it into every agent at once.
+
 ## Repo layout
 
 This repo deliberately hosts three different things, installed by two different
