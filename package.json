@@ -1,15 +1,12 @@
 {
   "name": "funkode-ai",
   "version": "0.1.0",
-  "description": "pi extensions for the funkode agent setup: context battery gauge and treehouse/branch/PR status.",
+  "description": "pi extensions, skills, and herdr plugins for the funkode agent setup.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/funkode-io/ai.git"
-  },
-  "pi": {
-    "extensions": ["./extensions"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

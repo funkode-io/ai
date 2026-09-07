@@ -62,10 +62,68 @@ Merged and closed PRs are marked `✓` and `✗`.
 
 ## Repo layout
 
-| Path | |
-| --- | --- |
-| `extensions/` | Loaded by pi (declared in `package.json` under `pi.extensions`) |
-| `wip/` | Not loaded. Work in progress — see below |
+This repo deliberately hosts three different things, installed by two different
+tools. The layout keeps them from colliding.
+
+| Path | Installed by | Loaded because |
+| --- | --- | --- |
+| `extensions/` | pi | Convention directory |
+| `skills/` | pi | Convention directory (when it exists) |
+| `prompts/`, `themes/` | pi | Convention directories (when they exist) |
+| `herdr/<plugin>/` | herdr | `herdr-plugin.toml` in that subdir |
+| `wip/` | nobody | Not a convention directory |
+
+### Why there is no `pi` key in `package.json`
+
+pi discovers resources one of two ways, and they are **mutually exclusive**
+(`dist/core/package-manager.js`):
+
+```js
+const manifest = readPiManifest(join(packageRoot, "package.json"));
+if (manifest) {
+    for (const resourceType of RESOURCE_TYPES) { /* extensions, skills, prompts, themes */
+        const entries = manifest[resourceType];   // undefined for omitted keys
+        this.addManifestEntries(entries, ...);
+    }
+    return true;                                  // convention dirs never reached
+}
+// only here does it fall back to extensions/ skills/ prompts/ themes/
+```
+
+So the moment a `pi` manifest exists, **any resource type omitted from it loads
+nothing** — silently. A `pi.extensions`-only manifest would mean that adding
+`skills/` later does nothing at all, with no error to explain why.
+
+With no manifest, all four convention directories are picked up automatically,
+and `herdr/` and `wip/` are ignored because they are not convention names. That
+is the right default for a repo meant to grow.
+
+If you ever do need a manifest (to exclude a specific file, say), declare
+**every** resource type the repo uses, not just the one you are filtering.
+
+### Adding a herdr plugin later
+
+Put it in its own subdir with a `herdr-plugin.toml` and install the subdir:
+
+```bash
+herdr plugin install funkode-io/ai/herdr/<plugin> [--ref REF]
+```
+
+Verified behaviour (herdr 0.8.2):
+
+- The plugin `id` in the manifest is **independent** of the subdir path — an id
+  of `funkode.probe` at `herdr/probe` installs fine.
+- herdr clones the **whole repo** to
+  `~/.config/herdr/plugins/github/<plugin_id>-<hash>/` and points `plugin_root`
+  at the subdir. The pi extensions come along for the ride; harmless, but note
+  that N herdr plugins means N full clones of this repo.
+- pi clones separately to `~/.pi/agent/git/github.com/funkode-io/ai`. The two
+  tools never share a directory, so there is no collision — but they pin refs
+  **independently**. If a herdr plugin and a pi extension ever have to agree on
+  a protocol, they can drift out of sync. Pin both to the same tag when that
+  matters.
+- herdr does **not** run `npm install`. A herdr plugin needing dependencies must
+  declare a `build` command in its manifest.
 
 ## Work in progress
 
@@ -93,7 +151,8 @@ rows = [["state_icon", "workspace", "tab"], ["agent", "$pr", "$ctx"]]
 ```
 
 Tracked in [#1](https://github.com/funkode-io/ai/issues/1). The file is kept
-out of `extensions/` so pi does not load a known-broken extension.
+in `wip/` — not a pi convention directory — so pi does not load a known-broken
+extension.
 
 ## Notes
 

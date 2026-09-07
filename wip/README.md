@@ -1,7 +1,8 @@
 # Work in progress
 
-Not loaded by pi. `package.json` points `pi.extensions` at `../extensions`
-only, so nothing here runs until it is fixed and moved.
+Not loaded by pi. `wip` is not one of pi's convention directories
+(`extensions`, `skills`, `prompts`, `themes`), so nothing here runs until it is
+fixed and moved into `extensions/`.
 
 ## `herdr-context-status.ts`
 
