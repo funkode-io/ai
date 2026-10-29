@@ -1,0 +1,12 @@
+{
+  "name": "funkode-ai",
+  "description": "funkode agent skills for Claude Code",
+  "owner": { "name": "funkode-io", "url": "https://github.com/funkode-io" },
+  "plugins": [
+    {
+      "name": "funkode",
+      "source": "./",
+      "description": "Live UI feedback: comment on a running web app from a bookmarklet; the agent polls the notes, fixes and replies in the page."
+    }
+  ]
+}

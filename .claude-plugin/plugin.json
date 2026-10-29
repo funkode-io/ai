@@ -1,0 +1,10 @@
+{
+  "name": "funkode",
+  "displayName": "funkode",
+  "description": "funkode agent skills: live UI feedback from a running web app (ui-feedback).",
+  "author": { "name": "funkode-io", "url": "https://github.com/funkode-io" },
+  "homepage": "https://github.com/funkode-io/ai",
+  "repository": "https://github.com/funkode-io/ai",
+  "license": "MIT",
+  "keywords": ["ui", "feedback", "bookmarklet", "review"]
+}

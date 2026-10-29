@@ -4,6 +4,9 @@
   "description": "pi extensions, skills, and herdr plugins for the funkode agent setup.",
   "keywords": ["pi-package"],
   "license": "MIT",
+  "scripts": {
+    "test": "node --test 'tests/*.test.mjs'"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/funkode-io/ai.git"
