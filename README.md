@@ -1,13 +1,20 @@
 # funkode / ai
 
-pi extensions for my agent setup. They add a status line to every pi session:
+pi extensions and agent skills for my agent setup. The extensions add a status
+line to every pi session:
 
 ```
 [▰▱▱▱▱] 11% 🏠 ⚠ main
 └─ context battery   └─ treehouse / branch / PR
 ```
 
+The [`ui-feedback`](#ui-feedback--comment-on-a-running-app) skill lets you comment
+on a running web app from your browser while the agent fixes and replies. It
+installs into both pi and Claude Code.
+
 ## Install
+
+### pi
 
 ```bash
 pi install git:github.com/funkode-io/ai
@@ -15,7 +22,7 @@ pi install git:github.com/funkode-io/ai
 
 That records the source in `~/.pi/agent/settings.json` and clones the repo to
 `~/.pi/agent/git/github.com/funkode-io/ai`. Restart pi (or `/reload`) and the
-status line appears.
+status line appears, and the `ui-feedback` skill is available (`/skill:ui-feedback`).
 
 > If you previously copied these files into `~/.pi/agent/extensions/`, delete
 > them after installing. pi would otherwise load each extension twice.
@@ -25,6 +32,74 @@ Update later with:
 ```bash
 pi update --extensions
 ```
+
+### Claude Code
+
+The repo is also a Claude Code plugin marketplace with one plugin, `funkode`,
+which carries the same skills (the extensions are pi-only). Inside Claude Code:
+
+```text
+/plugin marketplace add funkode-io/ai
+/plugin install funkode@funkode-ai
+```
+
+Or from a shell: `claude plugin marketplace add funkode-io/ai` then
+`claude plugin install funkode@funkode-ai`. Add `--scope project` to install
+it for one repository only. The skill is then `/funkode:ui-feedback`.
+
+The plugin sets no `version`, so Claude Code tracks the repo's commits:
+`/plugin marketplace update funkode-ai` (or auto-update) picks up new commits.
+
+## Skills
+
+### `ui-feedback` — comment on a running app
+
+Live UI feedback without changing the app. The agent starts a tiny receiver on
+`127.0.0.1` (Node only, zero dependencies) and gives you its setup link; you
+drag a **💬 Feedback** bookmarklet from that page once. On the running app, click the bookmark,
+then:
+
+- **Pick element** (`Alt+Shift+C`) and comment on it, or write a **Page
+  comment**; `Ctrl/⌘+Enter` queues it.
+- **Send** delivers the queue to the agent; send as often as you like.
+- **Done** sends what is left and ends the round.
+- **💬** shows the agent's replies, which arrive while you keep reviewing.
+
+Queued notes survive a page reload (`sessionStorage`); click the bookmark again
+to bring the bar back. The agent long-polls the notes as JSON — selector, text,
+HTML snippet and position of the element, plus URL and viewport — applies the
+fixes and answers in the page.
+
+Typical flow: once a UI PR is reviewed and green, ask the agent for a local run
+("let me give UI feedback"). It starts the app and the receiver and gives you
+two URLs; you comment, it fixes and replies, you press Done, it stops the
+receiver.
+
+Details:
+
+- **Port**: fixed at `4848` so the bookmark is a one-time install. Two
+  sessions at once need different ports (`--port` / `UFB_PORT`), and each port
+  has its own bookmark.
+- **Security**: the receiver binds to loopback only, refuses foreign `Host`
+  names, and requires a random token that only the setup link and the bookmark
+  carry, so other web pages (and other users on a shared host) cannot read
+  notes or inject them. The token lives in `~/.local/state/ufb/token`, mode
+  `0600` (`UFB_HOME` overrides the directory), and stays stable across
+  restarts.
+- **Browsers**: Chromium browsers — Chrome, Brave, Edge (tested in Chromium).
+  In Brave, if the bar does not appear, turn Shields off for the app's
+  `localhost` site. Apps whose Content-Security-Policy forbids external scripts
+  block any bookmarklet.
+- **No icon on the bookmark**: Chrome and Brave never show a favicon for
+  `javascript:` bookmarks, so the name **💬 Feedback** is the icon. Keep the
+  emoji when renaming it.
+- **Remote browser**: the receiver and the app must be reachable on the
+  browser's `localhost`. Lima/Colima forward loopback ports automatically;
+  over SSH, forward both ports (`ssh -L 4848:127.0.0.1:4848 …`).
+
+Run the receiver by hand with
+`node skills/ui-feedback/scripts/ufb.mjs --help` (Node 20+). Tests: `pnpm test`
+(or `node --test tests/ui-feedback.test.mjs`).
 
 ## Extensions
 
@@ -62,12 +137,14 @@ Merged and closed PRs are marked `✓` and `✗`.
 
 ## Scope
 
-This repo holds **tool-specific code** — things only pi or herdr can load.
-Agent-agnostic skills live in a separate repo:
+This repo holds **tool-specific code** — things only pi, Claude Code or herdr
+can load — and skills that ship as an installable package for those agents.
+Other agent-agnostic skills live in a separate repo:
 
 | | |
 | --- | --- |
 | pi extensions, herdr plugins | this repo |
+| Skills packaged for pi + Claude Code (`ui-feedback`) | this repo |
 | Skills (agent-agnostic) | [funkode-io/skills](https://github.com/funkode-io/skills) |
 
 The split is by consumer, not by tool. A plugin that extends herdr belongs
@@ -76,16 +153,22 @@ where the Skills CLI can install it into every agent at once.
 
 ## Repo layout
 
-This repo deliberately hosts three different things, installed by two different
-tools. The layout keeps them from colliding.
+This repo deliberately hosts several different things, installed by three
+different tools. The layout keeps them from colliding.
 
 | Path | Installed by | Loaded because |
 | --- | --- | --- |
 | `extensions/` | pi | Convention directory |
-| `skills/` | pi | Convention directory (when it exists) |
+| `skills/` | pi, Claude Code | pi convention directory; default skills directory of the root plugin |
+| `.claude-plugin/` | Claude Code | `marketplace.json` lists the repo root as plugin `funkode` (`plugin.json`) |
 | `prompts/`, `themes/` | pi | Convention directories (when they exist) |
 | `herdr/<plugin>/` | herdr | `herdr-plugin.toml` in that subdir |
-| `wip/` | nobody | Not a convention directory |
+| `tests/`, `wip/` | nobody | Not a convention directory |
+
+One skill directory serves both agents, so there is no duplicated code. Skill
+scripts must therefore find their files relative to themselves, not to a
+per-agent path. Claude Code installs a copy of the whole repo as the plugin;
+it ignores the pi extensions.
 
 ### Why there is no `pi` key in `package.json`
 
@@ -109,7 +192,7 @@ nothing** — silently. A `pi.extensions`-only manifest would mean that adding
 `skills/` later does nothing at all, with no error to explain why.
 
 With no manifest, all four convention directories are picked up automatically,
-and `herdr/` and `wip/` are ignored because they are not convention names. That
+and `herdr/`, `tests/` and `wip/` are ignored because they are not convention names. That
 is the right default for a repo meant to grow.
 
 If you ever do need a manifest (to exclude a specific file, say), declare
