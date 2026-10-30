@@ -24,6 +24,8 @@
   const saveQueue = () => store.set(QUEUE_KEY, queue);
   let picking = false, pinned = null, lastReply = 0, sending = false;
   let ended = false, endedBoot = null; // Done was accepted by receiver run `endedBoot`
+  let ending = false; // Done is in flight
+  const closed = () => ended || ending; // no new notes once the round is (being) ended
   const seenState = store.get(SEEN_KEY, null);
   let boot = seenState?.boot ?? null, seenReply = Number(seenState?.seen) || 0;
 
@@ -102,11 +104,13 @@
     $('#send').disabled = !queue.length || ended || sending;
     $('#done').disabled = ended || sending;
     $('#pick').classList.toggle('on', picking);
+    $('#pick').disabled = $('#page').disabled = closed();
     $('#rbtn').textContent = `💬 ${lastReply}`;
     $('#rbtn').classList.toggle('on', lastReply > seenReply);
   };
 
   const openCard = (el) => {
+    if (closed()) return;
     pinned = el;
     card.querySelector('.t').textContent = el ? describe(el).selector : 'Page comment · ' + location.pathname;
     const r = el ? el.getBoundingClientRect() : { left: innerWidth / 2 - 150, bottom: innerHeight / 3 };
@@ -116,6 +120,7 @@
   };
   const closeCard = () => { card.style.display = 'none'; pinned = null; if (!picking) highlight.style.display = 'none'; };
   const addNote = () => {
+    if (closed()) { closeCard(); return; }
     const comment = textarea.value.trim(); if (!comment) return;
     queue.push({ kind: pinned ? 'element' : 'page', comment, ...ctx(), element: pinned ? describe(pinned) : null, at: new Date().toISOString() });
     saveQueue(); closeCard(); refresh();
@@ -128,10 +133,13 @@
   };
   const send = async (end) => {
     if (sending) return;
+    if (end && card.style.display === 'block') addNote(); // keep a draft the user typed before pressing Done
     const sent = queue.length; // notes queued while the POST is in flight stay queued
     const batch = end ? [...queue, { kind: 'end', ...ctx(), at: new Date().toISOString() }] : [...queue];
     if (!batch.length) return;
-    sending = true; refresh();
+    sending = true; ending = end;
+    if (end) { closeCard(); setPicking(false); }
+    refresh();
     try {
       const { seq: last, boot: acceptedBy } = await post(batch);
       queue.splice(0, sent); saveQueue();
@@ -139,7 +147,7 @@
       if (end) { ended = true; endedBoot = acceptedBy; setPicking(false); flash(`Session ended${sent ? `, sent ${sent} note(s)${range}` : ''}. Replies still show here.`); }
       else flash(`Sent ${sent} note(s) to the agent${range}`);
     } catch (err) { flash('Send failed: ' + err.message + ' — notes kept'); }
-    sending = false;
+    sending = false; ending = false;
     refresh();
   };
 
@@ -181,7 +189,7 @@
     const r = e.target.getBoundingClientRect();
     Object.assign(highlight.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
   };
-  const setPicking = (v) => { picking = v; if (!v && !pinned) highlight.style.display = 'none'; refresh(); };
+  const setPicking = (v) => { picking = v && !closed(); if (!v && !pinned) highlight.style.display = 'none'; refresh(); };
   // Capture phase so the app (Dioxus, htmx, React…) never sees the picking click. The card opens on
   // pointerdown because disabled controls never get a click.
   for (const t of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
