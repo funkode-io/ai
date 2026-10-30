@@ -55,8 +55,8 @@ The plugin sets no `version`, so Claude Code tracks the repo's commits:
 ### `ui-feedback` — comment on a running app
 
 Live UI feedback without changing the app. The agent starts a tiny receiver on
-`127.0.0.1` (Node only, zero dependencies); you drag a **💬 Feedback**
-bookmarklet from its setup page once. On the running app, click the bookmark,
+`127.0.0.1` (Node only, zero dependencies) and gives you its setup link; you
+drag a **💬 Feedback** bookmarklet from that page once. On the running app, click the bookmark,
 then:
 
 - **Pick element** (`Alt+Shift+C`) and comment on it, or write a **Page
@@ -81,9 +81,11 @@ Details:
   sessions at once need different ports (`--port` / `UFB_PORT`), and each port
   has its own bookmark.
 - **Security**: the receiver binds to loopback only, refuses foreign `Host`
-  names, and requires a random token that only the bookmark carries, so other
-  web pages cannot inject notes. The token lives in `~/.local/state/ufb/`
-  (`UFB_HOME` overrides) and stays stable across restarts.
+  names, and requires a random token that only the setup link and the bookmark
+  carry, so other web pages (and other users on a shared host) cannot read
+  notes or inject them. The token lives in `~/.local/state/ufb/token`, mode
+  `0600` (`UFB_HOME` overrides the directory), and stays stable across
+  restarts.
 - **Browsers**: Chromium browsers — Chrome, Brave, Edge (tested in Chromium).
   In Brave, if the bar does not appear, turn Shields off for the app's
   `localhost` site. Apps whose Content-Security-Policy forbids external scripts
@@ -96,7 +98,8 @@ Details:
   over SSH, forward both ports (`ssh -L 4848:127.0.0.1:4848 …`).
 
 Run the receiver by hand with
-`node skills/ui-feedback/scripts/ufb.mjs --help`. Tests: `node --test 'tests/*.test.mjs'`.
+`node skills/ui-feedback/scripts/ufb.mjs --help` (Node 20+). Tests: `pnpm test`
+(or `node --test tests/ui-feedback.test.mjs`).
 
 ## Extensions
 

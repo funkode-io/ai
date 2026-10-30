@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ufb — live UI feedback receiver. Zero dependencies; Node >= 18.
+// ufb — live UI feedback receiver. Zero dependencies; Node >= 20.
 // Serves the overlay + bookmarklet page, takes notes from the page, long-polls them to the agent,
 // and carries the agent's replies back to the page.
 import http from 'node:http';
@@ -33,10 +33,11 @@ function bookmarklet({ origin, token }) {
 
 function setupPage({ origin, token }) {
   const href = escapeHtml(bookmarklet({ origin, token }));
+  const icon = `data:image/svg+xml,${encodeURIComponent(FAVICON)}`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>UI feedback</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}">
+<link rel="icon" type="image/svg+xml" href="${icon}">
 <style>
   :root{color-scheme:light dark;--fg:#111;--muted:#666;--bg:#fafafa;--card:#fff;--line:#e5e5e5}
   @media (prefers-color-scheme:dark){:root{--fg:#eee;--muted:#999;--bg:#18181b;--card:#232327;--line:#333}}
@@ -51,7 +52,7 @@ function setupPage({ origin, token }) {
   small{color:var(--muted)} code{font:13px ui-monospace,monospace}
 </style></head>
 <body><main>
-<h1><img src="data:image/svg+xml,${encodeURIComponent(FAVICON)}" alt="">UI feedback</h1>
+<h1><img src="${icon}" alt="">UI feedback</h1>
 <p class="sub">Comment on the running app; your agent receives the notes and replies here.</p>
 <p><a class="bm" href="${href}" title="Drag me to the bookmarks bar">💬 Feedback</a></p>
 <ol>
@@ -69,9 +70,62 @@ export async function startReceiver({ port = 0, host = '127.0.0.1', token, onShu
   if (!token) throw new Error('startReceiver needs a token');
   const notes = [];
   const replies = [];
-  const boot = randomUUID(); // replies restart at id 1 with each run; the page uses this to notice
+  const boot = randomUUID(); // reply ids restart at 1 with each run; the page uses this to notice
   const waiters = { notes: new Set(), replies: new Set() };
   const wake = (set) => { for (const w of [...set]) w(); };
+
+  // Each route: whether it needs the token, and its handler ({ req, res, u, json } => void).
+  // Everything that reveals or changes notes and replies needs the token; the setup page carries it, so it does too.
+  const routes = {
+    'GET /': { auth: true, handle: ({ res }) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(setupPage({ origin: `http://${host}:${server.address().port}`, token }));
+    } },
+    'GET /ufb.js': { auth: false, handle: ({ res }) => {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', ...CORS });
+      res.end(fs.readFileSync(OVERLAY));
+    } },
+    'GET /favicon.ico': { auth: false, handle: ({ res }) => {
+      res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=86400' });
+      res.end(FAVICON);
+    } },
+    'GET /health': { auth: false, handle: ({ json }) => {
+      json(200, { ok: true, app: 'ufb', port: server.address().port, seq: notes.length, replies: replies.length });
+    } },
+    'POST /notes': { auth: true, handle: (ctx) => readJson(ctx, (parsed) => {
+      const incoming = parsed?.notes;
+      if (!Array.isArray(incoming) || !incoming.every(validNote)) {
+        return ctx.json(400, { error: 'each note needs kind element|page|end and a comment' }, CORS);
+      }
+      for (const { seq: _pageSeq, ...n } of incoming) notes.push({ seq: notes.length + 1, ...n }); // seq is ours, not the page's
+      wake(waiters.notes);
+      ctx.json(200, { ok: true, seq: notes.length }, CORS);
+    }) },
+    'GET /poll': { auth: true, handle: (ctx) => {
+      const after = Number(ctx.u.searchParams.get('after') || 0);
+      longPoll(ctx, waiters.notes, () => notes.length > after, () => {
+        const fresh = notes.filter((n) => n.seq > after);
+        ctx.json(200, { seq: notes.length, notes: fresh, ended: fresh.some((n) => n.kind === 'end') });
+      });
+    } },
+    'POST /replies': { auth: true, handle: (ctx) => readJson(ctx, (parsed) => {
+      const text = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
+      if (!text) return ctx.json(400, { error: 'reply needs text' });
+      const re = Number.isInteger(parsed.re) ? parsed.re : null;
+      replies.push({ id: replies.length + 1, text, re, at: new Date().toISOString() });
+      wake(waiters.replies);
+      ctx.json(200, { ok: true, id: replies.length });
+    }) },
+    'GET /replies': { auth: true, handle: (ctx) => {
+      const after = Number(ctx.u.searchParams.get('after') || 0);
+      longPoll(ctx, waiters.replies, () => replies.length > after,
+        () => ctx.json(200, { boot, replies: replies.filter((r) => r.id > after) }, CORS));
+    } },
+    'POST /shutdown': { auth: true, handle: ({ json }) => {
+      json(200, { ok: true });
+      setImmediate(() => { onShutdown?.(); close(); });
+    } },
+  };
 
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -79,98 +133,50 @@ export async function startReceiver({ port = 0, host = '127.0.0.1', token, onShu
       res.writeHead(status, { 'content-type': 'application/json', ...headers });
       res.end(JSON.stringify(body) + '\n');
     };
-    const authed = u.searchParams.get('t') === token;
     // A page that rebinds its own DNS name to 127.0.0.1 would be same-origin with us; refuse foreign Host names.
     const hostName = (req.headers.host || '').replace(/:\d+$/, '');
     if (!LOOPBACK_NAMES.has(hostName)) return json(403, { error: 'loopback host names only' });
-    const readJson = (handle) => {
-      let body = '';
-      req.on('data', (c) => { body += c; if (body.length > MAX_BODY) { json(413, { error: 'too large' }, CORS); req.destroy(); } });
-      req.on('end', () => {
-        if (res.headersSent) return;
-        let parsed;
-        try { parsed = JSON.parse(body); } catch { return json(400, { error: 'body must be JSON' }, CORS); }
-        handle(parsed);
-      });
-    };
-    // Long-poll: answer now if something newer than `after` exists, else when woken or on timeout.
-    const longPoll = (set, respond, hasNew) => {
-      let t;
-      const send = () => { clearTimeout(t); set.delete(send); respond(); };
-      if (hasNew()) return send();
-      t = setTimeout(send, Math.min(Number(u.searchParams.get('timeout') ?? 90), MAX_WAIT_S) * 1000);
-      set.add(send);
-      res.on('close', () => { clearTimeout(t); set.delete(send); });
-    };
-    const after = Number(u.searchParams.get('after') || 0);
-    const route = `${req.method} ${u.pathname}`;
-
-    if (['POST /notes', 'GET /poll', 'POST /replies', 'GET /replies', 'POST /shutdown'].includes(route) && !authed) {
-      return json(403, { error: 'bad token' }, CORS);
+    const route = routes[`${req.method} ${u.pathname}`];
+    if (!route) return json(404, { error: 'not found' });
+    if (route.auth && u.searchParams.get('t') !== token) {
+      return json(403, { error: 'bad or missing token; open the setup link the agent gave you' }, CORS);
     }
-    if (route === 'GET /') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(setupPage({ origin: `http://${host}:${actualPort()}`, token }));
-    }
-    if (route === 'GET /ufb.js') {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', ...CORS });
-      return res.end(fs.readFileSync(OVERLAY));
-    }
-    if (route === 'GET /favicon.ico' || route === 'GET /favicon.svg') {
-      res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=86400' });
-      return res.end(FAVICON);
-    }
-    if (route === 'GET /health') {
-      return json(200, { ok: true, app: 'ufb', port: actualPort(), notes: notes.length, replies: replies.length });
-    }
-    if (route === 'POST /notes') {
-      return readJson((parsed) => {
-        const incoming = parsed?.notes;
-        if (!Array.isArray(incoming) || !incoming.every(validNote)) {
-          return json(400, { error: 'each note needs kind element|page|end and a comment' }, CORS);
-        }
-        for (const { seq: _pageSeq, ...n } of incoming) notes.push({ seq: notes.length + 1, ...n }); // seq is ours, not the page's
-        wake(waiters.notes);
-        json(200, { ok: true, seq: notes.length }, CORS);
-      });
-    }
-    if (route === 'GET /poll') {
-      return longPoll(waiters.notes, () => json(200, {
-        seq: notes.length,
-        notes: notes.filter((n) => n.seq > after),
-        ended: notes.some((n) => n.kind === 'end'),
-      }), () => notes.length > after);
-    }
-    if (route === 'POST /replies') {
-      return readJson((parsed) => {
-        const text = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
-        if (!text) return json(400, { error: 'reply needs text' });
-        const re = Number.isInteger(parsed.re) ? parsed.re : null;
-        replies.push({ id: replies.length + 1, text, re, at: new Date().toISOString() });
-        wake(waiters.replies);
-        json(200, { ok: true, id: replies.length });
-      });
-    }
-    if (route === 'GET /replies') {
-      return longPoll(waiters.replies, () => json(200, { boot, replies: replies.filter((r) => r.id > after) }, CORS),
-        () => replies.length > after);
-    }
-    if (route === 'POST /shutdown') {
-      json(200, { ok: true });
-      setImmediate(() => { onShutdown?.(); close(); });
-      return;
-    }
-    json(404, { error: 'not found' });
+    route.handle({ req, res, u, json });
   });
 
-  const actualPort = () => server.address().port;
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-  const actual = actualPort();
   const close = () => new Promise((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
     server.closeAllConnections();
   });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+  const actual = server.address().port;
   return { url: `http://${host}:${actual}`, port: actual, close };
+}
+
+function readJson({ req, json }, handle) {
+  let body = '', tooLarge = false;
+  req.setEncoding('utf8'); // decode across chunk boundaries, so split multi-byte characters survive
+  req.on('data', (c) => {
+    body += c;
+    if (body.length > MAX_BODY && !tooLarge) { tooLarge = true; json(413, { error: 'too large' }, CORS); req.destroy(); }
+  });
+  req.on('end', () => {
+    if (tooLarge) return;
+    let parsed;
+    try { parsed = JSON.parse(body); } catch { return json(400, { error: 'body must be JSON' }, CORS); }
+    handle(parsed);
+  });
+}
+
+// Long-poll: answer now if something newer exists, else when woken or when `timeout` seconds pass.
+function longPoll({ res, u }, waiting, hasNew, respond) {
+  let timer;
+  const send = () => { clearTimeout(timer); waiting.delete(send); respond(); };
+  if (hasNew()) return send();
+  const seconds = Math.min(Math.max(Number(u.searchParams.get('timeout') ?? 90) || 0, 0), MAX_WAIT_S);
+  timer = setTimeout(send, seconds * 1000);
+  waiting.add(send);
+  res.on('close', () => { clearTimeout(timer); waiting.delete(send); });
 }
 
 // --- CLI ------------------------------------------------------------------------------------
@@ -181,7 +187,7 @@ const HELP = `ufb — live UI feedback receiver
   node ufb.mjs start            start the receiver in the background (reuses a running one)
   node ufb.mjs serve            run the receiver in the foreground
   node ufb.mjs poll [--after N] [--timeout S]
-                                wait up to S seconds (default 90) for notes with seq > N; prints JSON
+                                wait up to S seconds (default 90, max ${MAX_WAIT_S}) for notes with seq > N; prints JSON
   node ufb.mjs reply [--re SEQ] <text...>     (use - to read the text from stdin)
                                 show a reply in the page, optionally tied to note SEQ
   node ufb.mjs status           print receiver health; exits 1 when it is not running
@@ -208,20 +214,33 @@ function stateDir() {
 }
 
 // The token is stable across restarts so a bookmark dragged once keeps working.
-async function loadToken({ create }) {
+function loadToken({ create }) {
   const dir = stateDir(), file = `${dir}/token`;
   try { return fs.readFileSync(file, 'utf8').trim(); } catch (err) { if (err.code !== 'ENOENT' || !create) throw err; }
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const token = randomBytes(16).toString('hex');
-  fs.writeFileSync(file, token + '\n', { mode: 0o600 });
-  return token;
+  try {
+    fs.writeFileSync(file, randomBytes(16).toString('hex') + '\n', { mode: 0o600, flag: 'wx' });
+  } catch (err) { if (err.code !== 'EEXIST') throw err; } // a concurrent start won the race: use its token
+  return fs.readFileSync(file, 'utf8').trim();
 }
 
-async function call(base, path, init) {
-  const res = await fetch(base + path, init);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${res.status} ${body.error || ''}`.trim());
-  return body;
+// node:http rather than fetch: fetch gives up on response headers after 300 s, and polls may wait longer.
+function call(base, path, { method = 'GET', body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(base + path, { method }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        if (res.statusCode >= 400) reject(new Error(`${res.statusCode} ${parsed.error || ''}`.trim()));
+        else resolve(parsed);
+      });
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 async function health(base) {
@@ -234,21 +253,22 @@ async function main(argv) {
   if (!cmd || opts.help || cmd === 'help') { console.log(HELP); return 0; }
   const port = Number(opts.port || process.env.UFB_PORT || DEFAULT_PORT);
   const base = `http://127.0.0.1:${port}`;
-  const info = () => ({ setup: `${base}/`, port });
+  const setupUrl = (token) => `${base}/?t=${token}`;
 
   if (cmd === 'serve') {
-    const token = await loadToken({ create: true });
+    const token = loadToken({ create: true });
     await startReceiver({ port, token, onShutdown: () => console.error('ufb: shutdown requested') });
     console.error(`ufb: listening on ${base}/  (setup page)`);
     return null; // keep running
   }
   if (cmd === 'start') {
-    const token = await loadToken({ create: true });
-    if (await health(base)) {
+    const token = loadToken({ create: true });
+    const running = await health(base);
+    if (running) {
       await call(base, `/poll?t=${token}&after=${Number.MAX_SAFE_INTEGER}&timeout=0`).catch(() => {
         throw new Error(`port ${port} runs a ufb receiver with another token (another UFB_HOME); pick another --port`);
       });
-      console.log(JSON.stringify({ ok: true, already: true, ...info() }));
+      console.log(JSON.stringify({ ok: true, already: true, setup: setupUrl(token), port, seq: running.seq }));
       return 0;
     }
     const { spawn } = await import('node:child_process');
@@ -259,7 +279,10 @@ async function main(argv) {
       { detached: true, stdio: ['ignore', fd, fd], env: process.env });
     child.unref();
     for (let i = 0; i < 50; i++) {
-      if (await health(base)) { console.log(JSON.stringify({ ok: true, already: false, ...info(), log })); return 0; }
+      if (await health(base)) {
+        console.log(JSON.stringify({ ok: true, already: false, setup: setupUrl(token), port, seq: 0, log }));
+        return 0;
+      }
       if (child.exitCode !== null) break;
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -268,10 +291,11 @@ async function main(argv) {
   if (cmd === 'status') {
     const h = await health(base);
     if (!h) { console.log(JSON.stringify({ ok: false, running: false, port })); return 1; }
-    console.log(JSON.stringify({ ...h, running: true, ...info() }));
+    console.log(JSON.stringify({ ...h, running: true }));
     return 0;
   }
-  const token = await loadToken({ create: false }).catch(() => { throw new Error('no receiver token yet; run `start` first'); });
+  let token;
+  try { token = loadToken({ create: false }); } catch { throw new Error('no receiver token yet; run `start` first'); }
   if (cmd === 'poll') {
     const after = Number(opts.after || 0), timeout = Number(opts.timeout ?? 90);
     const body = await call(base, `/poll?t=${token}&after=${after}&timeout=${timeout}`);

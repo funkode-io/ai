@@ -59,12 +59,40 @@ test('an idle poll returns no notes when it times out', async () => {
   });
 });
 
-test('an end note marks the session ended', async () => {
+test('an end note marks the round ended, and a later round starts fresh', async () => {
   await withReceiver(async (url) => {
     await postNotes(url, [note('last fix'), { kind: 'end', url: 'http://127.0.0.1:8080/x' }]);
     const body = await (await fetch(`${url}/poll?t=${TOKEN}&after=0&timeout=1`)).json();
     assert.equal(body.ended, true);
     assert.deepEqual(body.notes.map((n) => n.kind), ['page', 'end']);
+
+    await postNotes(url, [note('second round')]);
+    const next = await (await fetch(`${url}/poll?t=${TOKEN}&after=${body.seq}&timeout=1`)).json();
+    assert.equal(next.ended, false);
+    assert.deepEqual(next.notes.map((n) => n.comment), ['second round']);
+  });
+});
+
+test('the setup page, which carries the token, needs the token itself', async () => {
+  await withReceiver(async (url) => {
+    const res = await fetch(`${url}/`);
+    assert.equal(res.status, 403);
+    assert.doesNotMatch(await res.text(), new RegExp(TOKEN));
+  });
+});
+
+test('multi-byte characters split across chunks arrive intact', async () => {
+  await withReceiver(async (url) => {
+    const body = Buffer.from(JSON.stringify({ notes: [note('café 💬 ok')] }));
+    const cut = body.indexOf(Buffer.from('💬')) + 2; // inside the 4-byte emoji
+    await new Promise((resolve, reject) => {
+      const req = http.request(`${url}/notes?t=${TOKEN}`, { method: 'POST' }, (res) => { res.resume(); res.on('end', resolve); });
+      req.on('error', reject);
+      req.write(body.subarray(0, cut));
+      setTimeout(() => req.end(body.subarray(cut)), 50);
+    });
+    const polled = await (await fetch(`${url}/poll?t=${TOKEN}&after=0&timeout=1`)).json();
+    assert.equal(polled.notes[0].comment, 'café 💬 ok');
   });
 });
 
@@ -134,15 +162,16 @@ const rawGet = (url, path, headers) => new Promise((resolve, reject) => {
 test('requests addressed to a foreign host name are refused (DNS rebinding)', async () => {
   await withReceiver(async (url) => {
     const port = new URL(url).port;
-    assert.equal((await rawGet(url, '/', { host: `evil.example:${port}` })).status, 403);
-    assert.equal((await rawGet(url, '/', { host: `localhost:${port}` })).status, 200);
-    assert.equal((await rawGet(url, '/', { host: `127.0.0.1:${port}` })).status, 200);
+    const setup = `/?t=${TOKEN}`;
+    assert.equal((await rawGet(url, setup, { host: `evil.example:${port}` })).status, 403);
+    assert.equal((await rawGet(url, setup, { host: `localhost:${port}` })).status, 200);
+    assert.equal((await rawGet(url, setup, { host: `127.0.0.1:${port}` })).status, 200);
   });
 });
 
 test('the setup page offers a bookmarklet that loads the overlay with the token', async () => {
   await withReceiver(async (url) => {
-    const page = await (await fetch(`${url}/`)).text();
+    const page = await (await fetch(`${url}/?t=${TOKEN}`)).text();
     const href = page.match(/href="(javascript:[^"]+)"/)?.[1];
     assert.ok(href, 'page has a javascript: bookmarklet link');
     const decoded = decodeURIComponent(href);
@@ -192,17 +221,19 @@ test('the CLI starts a background receiver, polls, replies and stops it', async 
   const ufb = (...args) => execFileAsync(process.execPath, [CLI, ...args], { env, timeout: 20000 });
   try {
     const started = JSON.parse((await ufb('start')).stdout);
-    assert.equal(started.setup, `http://127.0.0.1:${port}/`);
-    assert.equal(started.port, port);
-
-    const again = JSON.parse((await ufb('start')).stdout);
-    assert.equal(again.already, true, 'a second start reuses the running receiver');
-
     const token = fs.readFileSync(path.join(home, 'token'), 'utf8').trim();
+    assert.equal(started.setup, `http://127.0.0.1:${port}/?t=${token}`);
+    assert.equal(started.port, port);
+    assert.equal(started.seq, 0);
+
     await postNotes(`http://127.0.0.1:${port}`, [note('from the page')], token);
 
     const polled = JSON.parse((await ufb('poll', '--after', '0', '--timeout', '1')).stdout);
     assert.deepEqual(polled.notes.map((n) => [n.seq, n.comment]), [[1, 'from the page']]);
+
+    const again = JSON.parse((await ufb('start')).stdout);
+    assert.equal(again.already, true, 'a second start reuses the running receiver');
+    assert.equal(again.seq, 1, 'and reports where its notes are, so the next round polls after them');
 
     await ufb('reply', '--re', '1', 'Fixed', 'it');
     const replies = await (await fetch(`http://127.0.0.1:${port}/replies?t=${token}&after=0&timeout=0`)).json();

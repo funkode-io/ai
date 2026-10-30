@@ -8,6 +8,7 @@
   const api = (path, params = '') => `${ORIGIN}${path}?t=${encodeURIComponent(TOKEN)}${params}`;
   const QUEUE_KEY = `ufb:queue:${ORIGIN}`;
   const SEEN_KEY = `ufb:seen-reply:${ORIGIN}`;
+  const TOKEN_CHANGED = 'Receiver token changed — open the setup link from your agent and drag the bookmark again';
 
   const store = {
     get: (k, d) => { try { return JSON.parse(sessionStorage.getItem(k)) ?? d; } catch { return d; } },
@@ -15,7 +16,7 @@
   };
   const queue = store.get(QUEUE_KEY, []);
   const saveQueue = () => store.set(QUEUE_KEY, queue);
-  let picking = false, pinned = null, lastReply = 0, ended = false;
+  let picking = false, pinned = null, lastReply = 0, ended = false, sending = false;
   const seenState = store.get(SEEN_KEY, null);
   let boot = seenState?.boot ?? null, seenReply = Number(seenState?.seen) || 0;
 
@@ -50,7 +51,7 @@
     <button id="send" disabled>Send (0)</button><button id="done" class="ok" title="Send what is queued and end the session">Done</button>
     <button id="rbtn" title="Agent replies">💬 0</button><button id="close" title="Hide (click the bookmark again to show)">✕</button></div>`;
   const $ = (s) => root.querySelector(s);
-  const hl = $('#hl'), card = $('#card'), ta = card.querySelector('textarea'), panel = $('#replies');
+  const highlight = $('#hl'), card = $('#card'), textarea = card.querySelector('textarea'), panel = $('#replies');
 
   const cssPath = (el) => {
     if (el.id) return '#' + CSS.escape(el.id);
@@ -73,7 +74,7 @@
     return {
       selector: cssPath(el), tag: el.localName,
       classes: typeof el.className === 'string' ? el.className.slice(0, 200) : '',
-      text: (el.innerText || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      text: (el.innerText || (el.type === 'password' ? '' : el.value) || '').replace(/\s+/g, ' ').trim().slice(0, 160),
       html: el.outerHTML.slice(0, 400),
       rect: { x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height) },
     };
@@ -83,8 +84,8 @@
   const flash = (t) => { const m = $('#msg'); m.textContent = t; m.style.display = 'block'; clearTimeout(flashTimer); flashTimer = setTimeout(() => (m.style.display = 'none'), 3000); };
   const refresh = () => {
     $('#send').textContent = `Send (${queue.length})`;
-    $('#send').disabled = !queue.length || ended;
-    $('#done').disabled = ended;
+    $('#send').disabled = !queue.length || ended || sending;
+    $('#done').disabled = ended || sending;
     $('#pick').classList.toggle('on', picking);
     $('#rbtn').textContent = `💬 ${lastReply}`;
     $('#rbtn').classList.toggle('on', lastReply > seenReply);
@@ -96,27 +97,26 @@
     const r = el ? el.getBoundingClientRect() : { left: innerWidth / 2 - 150, bottom: innerHeight / 3 };
     card.style.left = Math.min(Math.max(8, r.left), innerWidth - 310) + 'px';
     card.style.top = Math.max(8, Math.min(r.bottom + 6, innerHeight - 160)) + 'px';
-    card.style.display = 'block'; ta.value = ''; ta.focus();
+    card.style.display = 'block'; textarea.value = ''; textarea.focus();
   };
-  const closeCard = () => { card.style.display = 'none'; pinned = null; if (!picking) hl.style.display = 'none'; };
+  const closeCard = () => { card.style.display = 'none'; pinned = null; if (!picking) highlight.style.display = 'none'; };
   const addNote = () => {
-    const comment = ta.value.trim(); if (!comment) return;
+    const comment = textarea.value.trim(); if (!comment) return;
     queue.push({ kind: pinned ? 'element' : 'page', comment, ...ctx(), element: pinned ? describe(pinned) : null, at: new Date().toISOString() });
     saveQueue(); closeCard(); refresh();
   };
 
   const post = async (notes) => {
     const res = await fetch(api('/notes'), { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ notes }) });
-    if (!res.ok) throw new Error(res.status === 403 ? 'receiver token changed — reload the bookmark from its setup page' : `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(res.status === 403 ? TOKEN_CHANGED : `HTTP ${res.status}`);
     return (await res.json()).seq;
   };
-  let sending = false;
   const send = async (end) => {
     if (sending) return;
     const sent = queue.length; // notes queued while the POST is in flight stay queued
     const batch = end ? [...queue, { kind: 'end', ...ctx(), at: new Date().toISOString() }] : [...queue];
     if (!batch.length) return;
-    sending = true;
+    sending = true; refresh();
     try {
       const last = await post(batch);
       queue.splice(0, sent); saveQueue();
@@ -128,7 +128,8 @@
     refresh();
   };
 
-  const showReplies = () => { panel.style.display = 'block'; seenReply = lastReply; store.set(SEEN_KEY, { boot, seen: seenReply }); refresh(); };
+  const markSeen = (seen) => { seenReply = seen; store.set(SEEN_KEY, { boot, seen }); };
+  const showReplies = () => { panel.style.display = 'block'; markSeen(lastReply); refresh(); };
   const addReplies = (replies) => {
     for (const r of replies) {
       const div = document.createElement('div'); div.className = 'r';
@@ -144,14 +145,14 @@
     for (;;) {
       try {
         const res = await fetch(api('/replies', `&after=${lastReply}&timeout=25`));
-        if (res.status === 403) { flash('Receiver token changed — reload the bookmark from its setup page'); return; }
+        if (res.status === 403) { flash(TOKEN_CHANGED); return; }
         if (!res.ok) throw new Error(res.status);
         const body = await res.json();
         if (body.boot !== boot) {
           // The receiver restarted (reply ids start over), or this is the first answer from it.
           const restarted = boot !== null;
           boot = body.boot;
-          if (restarted || lastReply > 0) { lastReply = 0; seenReply = 0; $('#rlist').replaceChildren(); store.set(SEEN_KEY, { boot, seen: 0 }); continue; }
+          if (restarted || lastReply > 0) { lastReply = 0; markSeen(0); $('#rlist').replaceChildren(); continue; }
         }
         addReplies(body.replies);
       } catch { await new Promise((r) => setTimeout(r, 2000)); } // receiver down or restarting: retry quietly
@@ -162,9 +163,9 @@
   const onMove = (e) => {
     if (!picking || pinned || inUi(e)) return;
     const r = e.target.getBoundingClientRect();
-    Object.assign(hl.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+    Object.assign(highlight.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
   };
-  const setPicking = (v) => { picking = v; if (!v && !pinned) hl.style.display = 'none'; refresh(); };
+  const setPicking = (v) => { picking = v; if (!v && !pinned) highlight.style.display = 'none'; refresh(); };
   // Capture phase so the app (Dioxus, htmx, React…) never sees the picking click.
   for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup']) {
     addEventListener(t, (e) => {
@@ -179,7 +180,7 @@
     if (e.altKey && e.shiftKey && e.code === 'KeyC') { e.preventDefault(); setPicking(!picking); }
     else if (e.key === 'Escape') { if (card.style.display === 'block') closeCard(); else setPicking(false); }
   }, true);
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote(); });
+  textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote(); });
 
   $('#pick').onclick = () => setPicking(!picking);
   $('#page').onclick = () => openCard(null);
@@ -195,7 +196,7 @@
     host.style.display = hide ? 'none' : '';
     if (hide) { setPicking(false); closeCard(); } else if (lastReply > seenReply) showReplies();
   };
-  window.__ufb = { toggle, queue };
+  window.__ufb = { toggle };
   refresh();
   flash(queue.length ? `UI feedback ready — ${queue.length} queued note(s) restored` : 'UI feedback ready — Alt+Shift+C to pick');
   pollReplies();

@@ -5,7 +5,7 @@
   "keywords": ["pi-package"],
   "license": "MIT",
   "scripts": {
-    "test": "node --test 'tests/*.test.mjs'"
+    "test": "node --test tests/ui-feedback.test.mjs"
   },
   "repository": {
     "type": "git",
