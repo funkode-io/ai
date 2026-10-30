@@ -76,13 +76,21 @@
     }
     return parts.join(' > ');
   };
+  // Markup for the agent, without password values (typed ones are not in the markup; preset ones are).
+  const PASSWORD = 'input[type=password][value]';
+  const safeHtml = (el) => {
+    if (!el.matches(PASSWORD) && !el.querySelector(PASSWORD)) return el.outerHTML;
+    const copy = el.cloneNode(true);
+    for (const input of [copy, ...copy.querySelectorAll(PASSWORD)]) if (input.matches(PASSWORD)) input.setAttribute('value', '');
+    return copy.outerHTML;
+  };
   const describe = (el) => {
     const r = el.getBoundingClientRect();
     return {
       selector: cssPath(el), tag: el.localName,
       classes: typeof el.className === 'string' ? el.className.slice(0, 200) : '',
       text: String(el.innerText || (el.type === 'password' ? '' : el.value) || '').replace(/\s+/g, ' ').trim().slice(0, 160),
-      html: el.outerHTML.slice(0, 400),
+      html: safeHtml(el).slice(0, 400),
       rect: { x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height) },
     };
   };
@@ -174,12 +182,13 @@
     Object.assign(highlight.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
   };
   const setPicking = (v) => { picking = v; if (!v && !pinned) highlight.style.display = 'none'; refresh(); };
-  // Capture phase so the app (Dioxus, htmx, React…) never sees the picking click.
-  for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup']) {
+  // Capture phase so the app (Dioxus, htmx, React…) never sees the picking click. The card opens on
+  // pointerdown because disabled controls never get a click.
+  for (const t of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
     on(window, t, (e) => {
       if (!picking || inUi(e)) return;
       e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-      if (t === 'click' && !pinned) openCard(e.target);
+      if (t === 'pointerdown' && e.button === 0 && !pinned) openCard(e.target);
     });
   }
   on(window, 'mousemove', onMove);

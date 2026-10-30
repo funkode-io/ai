@@ -228,7 +228,8 @@ function loadToken({ create }) {
 }
 
 // node:http rather than fetch: fetch gives up on response headers after 300 s, and polls may wait longer.
-function call(base, path, { method = 'GET', body } = {}) {
+// `timeoutMs` bounds quick calls; long polls pass none.
+function call(base, path, { method = 'GET', body, timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(base + path, { method }, (res) => {
       let text = '';
@@ -242,13 +243,14 @@ function call(base, path, { method = 'GET', body } = {}) {
       });
     });
     req.on('error', reject);
+    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error(`no answer from ${base} within ${timeoutMs} ms`)));
     req.end(body);
   });
 }
 
 // Only a ufb receiver counts: another dev server on the port may answer 200 to anything.
 async function health(base) {
-  try { const h = await call(base, '/health'); return h.app === 'ufb' ? h : null; } catch { return null; }
+  try { const h = await call(base, '/health', { timeoutMs: 2000 }); return h.app === 'ufb' ? h : null; } catch { return null; }
 }
 
 async function main(argv) {
@@ -269,7 +271,7 @@ async function main(argv) {
     const token = loadToken({ create: true });
     const running = await health(base);
     if (running) {
-      await call(base, `/poll?t=${token}&after=${Number.MAX_SAFE_INTEGER}&timeout=0`).catch(() => {
+      await call(base, `/poll?t=${token}&after=${Number.MAX_SAFE_INTEGER}&timeout=0`, { timeoutMs: 5000 }).catch(() => {
         throw new Error(`port ${port} runs a ufb receiver with another token (another UFB_HOME); pick another --port`);
       });
       console.log(JSON.stringify({ ok: true, already: true, setup: setupUrl(token), port, seq: running.seq }));
@@ -311,13 +313,13 @@ async function main(argv) {
   if (cmd === 'reply') {
     const text = rest.length === 1 && rest[0] === '-' ? fs.readFileSync(0, 'utf8') : rest.join(' ');
     const re = opts.re === undefined ? undefined : Number(opts.re);
-    const body = await call(base, `/replies?t=${token}`, { method: 'POST', body: JSON.stringify({ text, re }) });
+    const body = await call(base, `/replies?t=${token}`, { method: 'POST', body: JSON.stringify({ text, re }), timeoutMs: 10000 });
     console.log(JSON.stringify(body));
     return 0;
   }
   if (cmd === 'stop') {
     if (!(await health(base))) { console.log(JSON.stringify({ ok: true, running: false, port })); return 0; }
-    await call(base, `/shutdown?t=${token}`, { method: 'POST' });
+    await call(base, `/shutdown?t=${token}`, { method: 'POST', timeoutMs: 5000 });
     console.log(JSON.stringify({ ok: true, stopped: true, port }));
     return 0;
   }

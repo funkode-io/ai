@@ -311,3 +311,20 @@ test('a page that does not know this receiver run gets an answer at once', async
     assert.ok(Date.now() - waited >= 250, 'a page on the current run long-polls as usual');
   });
 });
+
+test('the CLI gives up on a port that accepts connections but never answers', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ufb-test-'));
+  const sockets = new Set();
+  const silent = net.createServer((s) => { sockets.add(s); }); // accepts, never replies
+  await new Promise((r) => silent.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, UFB_HOME: home, UFB_PORT: String(silent.address().port) };
+  try {
+    const started = Date.now();
+    await assert.rejects(execFileAsync(process.execPath, [CLI, 'status'], { env, timeout: 15000 }));
+    assert.ok(Date.now() - started < 10000, 'status should time out quickly, not hang');
+  } finally {
+    for (const s of sockets) s.destroy();
+    silent.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
