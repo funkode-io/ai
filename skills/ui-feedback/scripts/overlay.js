@@ -1,8 +1,14 @@
 // ufb overlay — dev-only UI feedback. Loaded by the bookmarklet from the local receiver; zero deps.
 // Shadow DOM keeps the app's CSS out; capture-phase listeners keep picking clicks away from the app.
 (() => {
-  if (window.__ufb) { window.__ufb.toggle(); return; }
   const SRC = new URL(document.currentScript.src);
+  const prev = window.__ufb;
+  if (prev) {
+    if (prev.src === SRC.href) { prev.toggle(); return; } // same bookmark again: show/hide
+    prev.destroy(); // another receiver or a new token: replace the old overlay
+  }
+  const life = new AbortController(); // ends every listener and the reply poll on destroy
+  const on = (target, type, fn) => target.addEventListener(type, fn, { capture: true, signal: life.signal });
   const ORIGIN = SRC.origin;
   const TOKEN = SRC.searchParams.get('t') || '';
   const api = (path, params = '') => `${ORIGIN}${path}?t=${encodeURIComponent(TOKEN)}${params}`;
@@ -16,7 +22,8 @@
   };
   const queue = store.get(QUEUE_KEY, []);
   const saveQueue = () => store.set(QUEUE_KEY, queue);
-  let picking = false, pinned = null, lastReply = 0, ended = false, sending = false;
+  let picking = false, pinned = null, lastReply = 0, sending = false;
+  let ended = false, endedBoot = null; // Done was accepted by receiver run `endedBoot`
   const seenState = store.get(SEEN_KEY, null);
   let boot = seenState?.boot ?? null, seenReply = Number(seenState?.seen) || 0;
 
@@ -74,7 +81,7 @@
     return {
       selector: cssPath(el), tag: el.localName,
       classes: typeof el.className === 'string' ? el.className.slice(0, 200) : '',
-      text: (el.innerText || (el.type === 'password' ? '' : el.value) || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      text: String(el.innerText || (el.type === 'password' ? '' : el.value) || '').replace(/\s+/g, ' ').trim().slice(0, 160),
       html: el.outerHTML.slice(0, 400),
       rect: { x: Math.round(r.x + scrollX), y: Math.round(r.y + scrollY), w: Math.round(r.width), h: Math.round(r.height) },
     };
@@ -109,7 +116,7 @@
   const post = async (notes) => {
     const res = await fetch(api('/notes'), { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ notes }) });
     if (!res.ok) throw new Error(res.status === 403 ? TOKEN_CHANGED : `HTTP ${res.status}`);
-    return (await res.json()).seq;
+    return res.json();
   };
   const send = async (end) => {
     if (sending) return;
@@ -118,10 +125,10 @@
     if (!batch.length) return;
     sending = true; refresh();
     try {
-      const last = await post(batch);
+      const { seq: last, boot: acceptedBy } = await post(batch);
       queue.splice(0, sent); saveQueue();
       const range = sent ? ` (#${last - batch.length + 1}${sent > 1 ? '–#' + (last - batch.length + sent) : ''})` : '';
-      if (end) { ended = true; setPicking(false); flash(`Session ended${sent ? `, sent ${sent} note(s)${range}` : ''}. Replies still show here.`); }
+      if (end) { ended = true; endedBoot = acceptedBy; setPicking(false); flash(`Session ended${sent ? `, sent ${sent} note(s)${range}` : ''}. Replies still show here.`); }
       else flash(`Sent ${sent} note(s) to the agent${range}`);
     } catch (err) { flash('Send failed: ' + err.message + ' — notes kept'); }
     sending = false;
@@ -142,9 +149,9 @@
     if (lastReply > seenReply && host.style.display !== 'none') showReplies(); else refresh();
   };
   const pollReplies = async () => {
-    for (;;) {
+    while (!life.signal.aborted) {
       try {
-        const res = await fetch(api('/replies', `&after=${lastReply}&timeout=25`));
+        const res = await fetch(api('/replies', `&after=${lastReply}&boot=${encodeURIComponent(boot ?? '')}&timeout=25`), { signal: life.signal });
         if (res.status === 403) { flash(TOKEN_CHANGED); return; }
         if (!res.ok) throw new Error(res.status);
         const body = await res.json();
@@ -152,10 +159,11 @@
           // The receiver restarted (reply ids start over), or this is the first answer from it.
           const restarted = boot !== null;
           boot = body.boot;
+          if (ended && endedBoot !== boot) { ended = false; endedBoot = null; flash('The agent started a new feedback round'); refresh(); }
           if (restarted || lastReply > 0) { lastReply = 0; markSeen(0); $('#rlist').replaceChildren(); continue; }
         }
         addReplies(body.replies);
-      } catch { await new Promise((r) => setTimeout(r, 2000)); } // receiver down or restarting: retry quietly
+      } catch { if (!life.signal.aborted) await new Promise((r) => setTimeout(r, 2000)); } // receiver down or restarting: retry quietly
     }
   };
 
@@ -168,18 +176,18 @@
   const setPicking = (v) => { picking = v; if (!v && !pinned) highlight.style.display = 'none'; refresh(); };
   // Capture phase so the app (Dioxus, htmx, React…) never sees the picking click.
   for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup']) {
-    addEventListener(t, (e) => {
+    on(window, t, (e) => {
       if (!picking || inUi(e)) return;
       e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
       if (t === 'click' && !pinned) openCard(e.target);
-    }, true);
+    });
   }
-  addEventListener('mousemove', onMove, true);
-  addEventListener('keydown', (e) => {
+  on(window, 'mousemove', onMove);
+  on(window, 'keydown', (e) => {
     if (host.style.display === 'none') return;
     if (e.altKey && e.shiftKey && e.code === 'KeyC') { e.preventDefault(); setPicking(!picking); }
     else if (e.key === 'Escape') { if (card.style.display === 'block') closeCard(); else setPicking(false); }
-  }, true);
+  });
   textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote(); });
 
   $('#pick').onclick = () => setPicking(!picking);
@@ -196,7 +204,8 @@
     host.style.display = hide ? 'none' : '';
     if (hide) { setPicking(false); closeCard(); } else if (lastReply > seenReply) showReplies();
   };
-  window.__ufb = { toggle };
+  const destroy = () => { life.abort(); host.remove(); if (window.__ufb?.src === SRC.href) delete window.__ufb; };
+  window.__ufb = { src: SRC.href, toggle, destroy };
   refresh();
   flash(queue.length ? `UI feedback ready — ${queue.length} queued note(s) restored` : 'UI feedback ready — Alt+Shift+C to pick');
   pollReplies();

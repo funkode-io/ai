@@ -99,7 +99,7 @@ export async function startReceiver({ port = 0, host = '127.0.0.1', token, onShu
       }
       for (const { seq: _pageSeq, ...n } of incoming) notes.push({ seq: notes.length + 1, ...n }); // seq is ours, not the page's
       wake(waiters.notes);
-      ctx.json(200, { ok: true, seq: notes.length }, CORS);
+      ctx.json(200, { ok: true, seq: notes.length, boot }, CORS);
     }) },
     'GET /poll': { auth: true, handle: (ctx) => {
       const after = Number(ctx.u.searchParams.get('after') || 0);
@@ -118,7 +118,9 @@ export async function startReceiver({ port = 0, host = '127.0.0.1', token, onShu
     }) },
     'GET /replies': { auth: true, handle: (ctx) => {
       const after = Number(ctx.u.searchParams.get('after') || 0);
-      longPoll(ctx, waiters.replies, () => replies.length > after,
+      // A page that does not know this run yet (first load, or we restarted) gets the boot id at once.
+      const knowsRun = ctx.u.searchParams.get('boot') === boot;
+      longPoll(ctx, waiters.replies, () => !knowsRun || replies.length > after,
         () => ctx.json(200, { boot, replies: replies.filter((r) => r.id > after) }, CORS));
     } },
     'POST /shutdown': { auth: true, handle: ({ json }) => {
@@ -128,11 +130,12 @@ export async function startReceiver({ port = 0, host = '127.0.0.1', token, onShu
   };
 
   const server = http.createServer((req, res) => {
-    const u = new URL(req.url, 'http://x');
     const json = (status, body, headers = {}) => {
       res.writeHead(status, { 'content-type': 'application/json', ...headers });
       res.end(JSON.stringify(body) + '\n');
     };
+    let u;
+    try { u = new URL(req.url, 'http://x'); } catch { return json(400, { error: 'bad request path' }); }
     // A page that rebinds its own DNS name to 127.0.0.1 would be same-origin with us; refuse foreign Host names.
     const hostName = (req.headers.host || '').replace(/:\d+$/, '');
     if (!LOOPBACK_NAMES.has(hostName)) return json(403, { error: 'loopback host names only' });
@@ -243,8 +246,9 @@ function call(base, path, { method = 'GET', body } = {}) {
   });
 }
 
+// Only a ufb receiver counts: another dev server on the port may answer 200 to anything.
 async function health(base) {
-  try { return await call(base, '/health'); } catch { return null; }
+  try { const h = await call(base, '/health'); return h.app === 'ufb' ? h : null; } catch { return null; }
 }
 
 async function main(argv) {

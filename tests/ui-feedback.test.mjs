@@ -136,7 +136,8 @@ test('agent replies reach the page, readable cross-origin', async () => {
 
 test('a waiting page wakes when the agent replies', async () => {
   await withReceiver(async (url) => {
-    const pending = fetch(`${url}/replies?t=${TOKEN}&after=0&timeout=10`).then((r) => r.json());
+    const { boot } = await (await fetch(`${url}/replies?t=${TOKEN}&after=0&timeout=0`)).json();
+    const pending = fetch(`${url}/replies?t=${TOKEN}&after=0&boot=${boot}&timeout=10`).then((r) => r.json());
     await new Promise((r) => setTimeout(r, 100));
     await postReply(url, { text: 'On it' });
     assert.deepEqual((await pending).replies.map((r) => r.text), ['On it']);
@@ -256,4 +257,57 @@ test('each receiver run has its own boot id so a page can tell a restart from no
   }
   assert.ok(boots[0] && boots[1]);
   assert.notEqual(boots[0], boots[1]);
+});
+
+test('an unparseable request path is rejected and the receiver keeps running', async () => {
+  await withReceiver(async (url) => {
+    const port = new URL(url).port;
+    const status = await new Promise((resolve, reject) => {
+      const sock = net.connect(Number(port), '127.0.0.1', () => sock.write(`GET //[ HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`));
+      let data = '';
+      sock.on('data', (c) => { data += c; });
+      sock.on('end', () => resolve(Number(data.split(' ')[1])));
+      sock.on('error', reject);
+    });
+    assert.equal(status, 400);
+    assert.equal((await fetch(`${url}/health`)).status, 200);
+  });
+});
+
+test('sending notes reports the boot id of the receiver that took them', async () => {
+  await withReceiver(async (url) => {
+    const sent = await (await postNotes(url, [{ kind: 'end' }])).json();
+    const replies = await (await fetch(`${url}/replies?t=${TOKEN}&after=0&timeout=0`)).json();
+    assert.equal(sent.boot, replies.boot);
+  });
+});
+
+test('the CLI does not mistake another server on the port for a receiver', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ufb-test-'));
+  const other = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html>spa'); });
+  await new Promise((r) => other.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, UFB_HOME: home, UFB_PORT: String(other.address().port) };
+  const ufb = (...args) => execFileAsync(process.execPath, [CLI, ...args], { env, timeout: 20000 });
+  try {
+    await assert.rejects(ufb('status'), 'status: not a receiver');
+    await assert.rejects(ufb('start'), 'start: the port is taken, it must not report already:true');
+  } finally {
+    other.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a page that does not know this receiver run gets an answer at once', async () => {
+  await withReceiver(async (url) => {
+    const started = Date.now();
+    const first = await (await fetch(`${url}/replies?t=${TOKEN}&after=0&timeout=10`)).json();
+    const stale = await (await fetch(`${url}/replies?t=${TOKEN}&after=3&boot=old-run&timeout=10`)).json();
+    assert.ok(Date.now() - started < 2000, 'no long wait without a known boot');
+    assert.ok(first.boot);
+    assert.equal(stale.boot, first.boot);
+
+    const waited = Date.now();
+    await (await fetch(`${url}/replies?t=${TOKEN}&after=0&boot=${first.boot}&timeout=0.3`)).json();
+    assert.ok(Date.now() - waited >= 250, 'a page on the current run long-polls as usual');
+  });
 });
